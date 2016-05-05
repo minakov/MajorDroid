@@ -6,15 +6,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.hardware.Camera;
 import android.hardware.Camera.Face;
 import android.hardware.Camera.FaceDetectionListener;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
 import android.location.Criteria;
 import android.location.Location;
 import android.location.LocationListener;
@@ -30,7 +24,7 @@ import android.os.Handler;
 import android.preference.PreferenceManager;
 import android.provider.Settings.Secure;
 import android.speech.RecognizerIntent;
-import android.speech.tts.TextToSpeech;
+import android.support.annotation.Nullable;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -48,12 +42,6 @@ import android.widget.ProgressBar;
 import android.widget.TableLayout;
 import android.widget.Toast;
 
-import com.example.recognizer.DataFiles;
-import com.example.recognizer.Grammar;
-import com.example.recognizer.PhonMapper;
-
-import org.apache.commons.io.FileUtils;
-
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -68,32 +56,23 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
 import java.util.Timer;
 import java.util.TimerTask;
-
-import edu.cmu.pocketsphinx.Hypothesis;
-import edu.cmu.pocketsphinx.RecognitionListener;
-import edu.cmu.pocketsphinx.SpeechRecognizer;
-import edu.cmu.pocketsphinx.SpeechRecognizerSetup;
 
 //import java.util.LinkedList;
 //import java.util.Queue;
 
 
-public class MainActivity extends Activity implements RecognitionListener, SensorEventListener {
+public class MainActivity extends Activity {
 
     private static final String TAG = MainActivity.class.getSimpleName();
     private static final int REQUEST_CODE_VOICE = 1234;
     private static final int REQUEST_CODE_MESSAGE = 1236;
     private static final int REQUEST_CODE_QR = 1237;
-    private static final int VOICE_INPUT_TIMIOUT_MILLIS = 10000;
-    private static final String COMMAND_SEARCH = "command";
-    private static final String KWS_SEARCH = "hotword";
     private final int TCP_SERVER_PORT = 7999; //Define the server port
-    private final Handler mHandler = new Handler();
     ProgressDialog dialog;
+    @Nullable
+    private VoiceRecognizer voiceRecognizer;
     private ReloadWebView reloadWebViewTimer;
     private WebView mWebView;
     private WebView webPost;
@@ -103,7 +82,6 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
             passw = "", wifiHomeNet = "", pathHomepage = "", pathVoice = "", pathQR = "", pathGps = "";
     private String tmpDostupAccess = "";
     private String tmpAdressAccess = "";
-    private String VoiceHotWord = "";
     private String uploadURL = "";
     private String faceURL = "";
     private boolean outAccess = false;
@@ -112,34 +90,17 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     private boolean reloadTimerOn = false;
     private Timer timer;
     private TimerTask doAsynchronousTask;
-    private Handler delayHandler;
     private boolean timerOn = false;
     private boolean faceDetectionEnable = false;
     private boolean faceDetectionWorking = false;
-    private boolean voiceProximityEnable = false;
-    private boolean voiceKeywordEnable = false;
-    private boolean voiceKeywordWorking = false;
-    private boolean voiceGoogleInProgress = false;
     private boolean disableFacePost = false;
     private MediaPlayer mediaPlayer;
     private String qrCameraSet;
     private Camera mCamera;
     private SurfaceView cameraSurface;
     private int NumberOfFacesDetected = 0;
-    private SpeechRecognizer mRecognizer;
-    private final Runnable mStopRecognitionCallback = new Runnable() {
-        @Override
-        public void run() {
-            stopRecognition();
-        }
-    };
-    private SensorManager mSensorManager;
-    private float mSensorMaximum;
-    private float mSensorValue;
     private int serverResponseCode = 0;
     private String activityResultString = "";
-
-    private TextToSpeech tts1;
 
 
     private FaceDetectionListener faceDetectionListener = new FaceDetectionListener() {
@@ -164,20 +125,6 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
             }
         }
     };
-
-    @Override
-    protected void onPause() {
-
-        Log.d(TAG, "Activity pause");
-        super.onPause();
-        if (voiceKeywordWorking) {
-            mRecognizer.cancel();
-            mRecognizer.stop();
-            voiceKeywordWorking = false;
-        }
-        turnOffFaceDetectionCamera();
-
-    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -219,37 +166,27 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
             }
         };
 
-
-        tts1 = new TextToSpeech(getApplicationContext(), new TextToSpeech.OnInitListener() {
+        voiceRecognizer = new VoiceRecognizer(this, REQUEST_CODE_VOICE, new VoiceRecognizer.InitListener() {
             @Override
-            public void onInit(int status) {
-                if (status != TextToSpeech.ERROR) {
-                    //Locale locale = new Locale("ru");
-                    int result = tts1.setLanguage(Locale.getDefault());
+            public void initStarted() {
+                turnOffFaceDetectionCamera();
+            }
 
-                    if (result == TextToSpeech.LANG_MISSING_DATA
-                            || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                        Log.e("TTS", "Sorry, tts is not supported");
-                    }
-
-                }
+            @Override
+            public void initFailed() {
+                initiateFaceDetectionCamera();
             }
         });
 
-
-        SharedPreferences prefs = PreferenceManager
-                .getDefaultSharedPreferences(this);
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         gpsTimeOut = prefs.getString(getString(R.string.gps_period), "5");
         if ((prefs.getString(getString(R.string.gps_switch), "Выкл").equals("Вкл")) && (!timerOn)) {
-            timer.schedule(doAsynchronousTask, 0,
-                    Long.parseLong(gpsTimeOut) * 60 * 1000);
+            timer.schedule(doAsynchronousTask, 0, Long.parseLong(gpsTimeOut) * 60 * 1000);
             timerOn = true;
         }
 
-
         //New thread to listen to incoming connections
         new Thread(new Runnable() {
-
             @Override
             public void run() {
                 try {
@@ -273,223 +210,29 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
             }
         }).start();
 
-
-        voiceProximityEnable = (prefs.getString(getString(R.string.voice_proximity), "Выкл").equals("Вкл"));
-
-
-        voiceKeywordEnable = (prefs.getString(getString(R.string.voice_switch), "Выкл").equals("Вкл"));
-        VoiceHotWord = prefs.getString(getString(R.string.voice_phrase), "проснись");
-        if (voiceKeywordEnable) {
-            setupRecognizer();
-        }
-
-        mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
-        Sensor sensor = mSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
-        if (sensor != null) {
-            mSensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_FASTEST);
-            mSensorMaximum = sensor.getMaximumRange();
-        }
-        delayHandler = new android.os.Handler();
-
         mediaPlayer = new MediaPlayer();
         mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+    }
 
+    @Override
+    protected void onPause() {
+        Log.d(TAG, "Activity pause");
+        super.onPause();
+        if (voiceRecognizer != null) {
+            voiceRecognizer.release();
+        }
+        turnOffFaceDetectionCamera();
     }
 
     @Override
     protected void onDestroy() {
-        if (mRecognizer != null) mRecognizer.cancel();
-        mSensorManager.unregisterListener(this);
-        if (voiceKeywordWorking) {
-            mRecognizer.cancel();
-            mRecognizer.stop();
-            voiceKeywordWorking = false;
+        if (voiceRecognizer != null) {
+            voiceRecognizer.destroy();
         }
         turnOffFaceDetectionCamera();
         if (mCamera != null) mCamera = null;
 
         super.onDestroy();
-    }
-
-    private void setupRecognizer() {
-
-        new AsyncTask<Void, Void, Exception>() {
-            @Override
-            protected Exception doInBackground(Void... params) {
-                try {
-                    /*
-                    List<Device> devices = mController.getDevices();
-                    final String[] names = new String[devices.size()];
-                    for (int i = 0; i < names.length; i++) {
-                        names[i] = devices.get(i).name;
-                    }
-                    */
-
-
-                    final String[] names = new String[1];
-                    names[0] = VoiceHotWord;
-                    PhonMapper phonMapper = new PhonMapper(getAssets().open("dict/ru/hotwords"));
-                    Grammar grammar = new Grammar(names, phonMapper);
-                    grammar.addWords(VoiceHotWord);
-
-                    DataFiles dataFiles = new DataFiles(getPackageName(), "ru");
-                    File hmmDir = new File(dataFiles.getHmm());
-                    File dict = new File(dataFiles.getDict());
-                    File jsgf = new File(dataFiles.getJsgf());
-                    copyAssets(hmmDir);
-                    saveFile(jsgf, grammar.getJsgf());
-                    saveFile(dict, grammar.getDict());
-
-                    Log.d(TAG, "Recognizer initiate");
-                    mRecognizer = SpeechRecognizerSetup.defaultSetup()
-                            .setAcousticModel(hmmDir)
-                            .setDictionary(dict)
-                            .setBoolean("-remove_noise", false)
-                            .setKeywordThreshold(1e-7f)
-                            .getRecognizer();
-
-                    Log.d(TAG, "Add keyphrase search");
-                    mRecognizer.addKeyphraseSearch(KWS_SEARCH, VoiceHotWord);
-
-
-                    //Log.d(TAG, "Add grammar search");
-                    //mRecognizer.addGrammarSearch(COMMAND_SEARCH, jsgf);
-                } catch (IOException e) {
-                    return e;
-                }
-                return null;
-            }
-
-            @Override
-            protected void onPostExecute(Exception ex) {
-                if (ex != null) {
-                    onRecognizerSetupError(ex);
-                } else {
-                    onRecognizerSetupComplete();
-                }
-            }
-        }.execute();
-    }
-
-    private void onRecognizerSetupComplete() {
-        voiceKeywordWorking = true;
-        Toast.makeText(this, "Activation: \"" + VoiceHotWord + "\"", Toast.LENGTH_SHORT).show();
-        mRecognizer.addListener(this);
-        mRecognizer.startListening(KWS_SEARCH);
-    }
-
-    private void onRecognizerSetupError(Exception ex) {
-        Toast.makeText(this, ex.getMessage(), Toast.LENGTH_LONG).show();
-        voiceKeywordWorking = false;
-    }
-
-    private void copyAssets(File baseDir) throws IOException {
-        String[] files = getAssets().list("hmm/ru");
-
-        for (String fromFile : files) {
-            File toFile = new File(baseDir.getAbsolutePath() + "/" + fromFile);
-            InputStream in = getAssets().open("hmm/ru/" + fromFile);
-            FileUtils.copyInputStreamToFile(in, toFile);
-        }
-    }
-
-    private void saveFile(File f, String content) throws IOException {
-        File dir = f.getParentFile();
-        if (!dir.exists() && !dir.mkdirs()) {
-            throw new IOException("Cannot create directory: " + dir);
-        }
-        FileUtils.writeStringToFile(f, content, "UTF8");
-    }
-
-    @Override
-    public void onBeginningOfSpeech() {
-        Log.d(TAG, "onBeginningOfSpeech");
-    }
-
-    @Override
-    public void onEndOfSpeech() {
-        Log.d(TAG, "onEndOfSpeech");
-        if (mRecognizer.getSearchName().equals(COMMAND_SEARCH)) {
-            mRecognizer.stop();
-        }
-    }
-
-    @Override
-    public void onPartialResult(Hypothesis hypothesis) {
-        if (hypothesis == null) return;
-        String text = hypothesis.getHypstr();
-        if (KWS_SEARCH.equals(mRecognizer.getSearchName())) {
-            startRecognition();
-        } else {
-            Log.d(TAG, text);
-        }
-    }
-
-    @Override
-    public void onResult(Hypothesis hypothesis) {
-        mHandler.removeCallbacks(mStopRecognitionCallback);
-        String text = hypothesis != null ? hypothesis.getHypstr() : null;
-        Log.d(TAG, "onResult " + text);
-        if (text != null) {
-            Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
-            process(text);
-        }
-        if (COMMAND_SEARCH.equals(mRecognizer.getSearchName())) {
-            mRecognizer.startListening(KWS_SEARCH);
-        }
-    }
-
-    private void startStopRecognition() {
-        if (mRecognizer == null) return;
-        if (KWS_SEARCH.equals(mRecognizer.getSearchName())) {
-            startRecognition();
-        } else {
-            stopRecognition();
-        }
-    }
-
-    private synchronized void startRecognition() {
-        if (mRecognizer == null || COMMAND_SEARCH.equals(mRecognizer.getSearchName())) return;
-        imgb_voice_click(null);
-        /*
-        new ToneGenerator(AudioManager.STREAM_MUSIC, ToneGenerator.MAX_VOLUME).startTone(ToneGenerator.TONE_CDMA_PIP, 200);
-        post(400, new Runnable() {
-            @Override
-            public void run() {
-                //mRecognizer.startListening(COMMAND_SEARCH, 3000);
-                Log.d(TAG, "Listen commands");
-                extCommand("hi");
-                //post(4000, mStopRecognitionCallback);
-            }
-        });
-        */
-    }
-
-    private synchronized void stopRecognition() {
-        if (mRecognizer == null || KWS_SEARCH.equals(mRecognizer.getSearchName())) return;
-        mRecognizer.stop();
-        voiceKeywordWorking = false;
-    }
-
-    @Override
-    public void onSensorChanged(SensorEvent event) {
-        if (!voiceProximityEnable) return;
-        mSensorValue = event.values[0];
-        if (mSensorValue < mSensorMaximum) {
-            post(500, new Runnable() {
-                @Override
-                public void run() {
-                    if ((mSensorValue < mSensorMaximum)) {
-                        //startRecognition();
-                        imgb_voice_click(null);
-                    }
-                }
-            });
-        }
-    }
-
-    @Override
-    public void onAccuracyChanged(Sensor sensor, int accuracy) {
     }
 
     @Override
@@ -501,13 +244,6 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
         return super.onKeyDown(keyCode, event);
     }
 
-    private void post(long delay, Runnable task) {
-        mHandler.postDelayed(task, delay);
-    }
-
-    private void process(final String text) {
-    }
-
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         getMenuInflater().inflate(R.menu.main, menu);
@@ -517,7 +253,6 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         switch (item.getItemId()) {
-
             case R.id.action_about:
                 Intent ab = new Intent(this, AboutActivity.class);
                 startActivity(ab);
@@ -531,14 +266,9 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
                 if (timerOn) {
                     timer.cancel();
                 }
-                if (reloadTimerOn) {
-                    //reloadTimer.cancel();
+                if (voiceRecognizer != null) {
+                    voiceRecognizer.quit();
                 }
-                if (mRecognizer != null) {
-                    mRecognizer.stop();
-                    mRecognizer.cancel();
-                }
-
                 finish();
                 return true;
 
@@ -556,30 +286,21 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
 
         int goToHome = 0;
 
-        delayHandler.removeCallbacksAndMessages(null);
-
         if (requestCode == REQUEST_CODE_VOICE) {
-            voiceGoogleInProgress = false;
+            if (voiceRecognizer != null) {
+                voiceRecognizer.onGoogleVoiceRecognizeResult();
+            }
+            if (resultCode == RESULT_OK) {
+                ArrayList<String> matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+                voiceCommand(matches.get(0));
+            }
         }
-
-        if (requestCode == REQUEST_CODE_VOICE && resultCode == RESULT_OK) {
-            ArrayList<String> matches = data
-                    .getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-            voiceCommand(matches.get(0));
-        }
-
 
         if (requestCode == REQUEST_CODE_MESSAGE && resultCode == RESULT_OK) {
             Log.d(TAG, "Got REQUEST_CODE_MESSAGE");
 
             activityResultString = data.getStringExtra("filename");
 
-			/*
-            Toast toast = Toast.makeText(getApplicationContext(), "Got video message!\n"+activityResultString,
-					Toast.LENGTH_LONG);
-			toast.setGravity(Gravity.BOTTOM, 0, 0);
-			toast.show();
-			*/
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
             if (prefs.getString(getString(R.string.homeaftervideo), "off").equals("on")) {
                 goToHome = 1;
@@ -589,28 +310,19 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
 
             new Thread(new Runnable() {
                 public void run() {
-
                     uploadFile(activityResultString);
-
-
                 }
             }).start();
-
         }
 
         if (requestCode == REQUEST_CODE_QR) {
-            IntentResult scanResult = IntentIntegrator.parseActivityResult(
-                    requestCode, resultCode, data);
+            IntentResult scanResult = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
 
             if (scanResult != null) {
                 // handle scan result
-                String contantsString = scanResult.getContents() == null ? "0"
-                        : scanResult.getContents();
-
+                String contantsString = scanResult.getContents() == null ? "0" : scanResult.getContents();
                 if (contantsString.equalsIgnoreCase("0")) {
-                    Toast.makeText(this, "No code scanned",
-                            Toast.LENGTH_LONG).show();
-
+                    Toast.makeText(this, "No code scanned", Toast.LENGTH_LONG).show();
                 } else {
                     Toast.makeText(this, contantsString, Toast.LENGTH_LONG).show();
                     if (contantsString.startsWith("http")) {
@@ -619,12 +331,9 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
                         mWebView.loadUrl(getServerURL(serverURL) + pathQR + contantsString);
                     }
                 }
-
             } else {
-                Toast.makeText(this, "Problem to secan the barcode.",
-                        Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "Problem to secan the barcode.", Toast.LENGTH_LONG).show();
             }
-
         }
 
 
@@ -632,12 +341,6 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
             Log.d(TAG, "Activity finished (not OK)");
         }
 
-        if (voiceKeywordEnable && !voiceKeywordWorking) {
-            voiceGoogleInProgress = false;
-            mRecognizer.cancel();
-            mRecognizer.startListening(KWS_SEARCH);
-            voiceKeywordWorking = true;
-        }
         initiateFaceDetectionCamera();
 
         if (goToHome == 1) {
@@ -650,15 +353,12 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     @Override
     public void onResume() {
         Log.d(TAG, "Activity resume");
-
         super.onResume();
         loadHomePage(0);
-
     }
 
     private void loadHomePage(int immediateLoad) {
-        SharedPreferences prefs = PreferenceManager
-                .getDefaultSharedPreferences(this);
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         localURL = prefs.getString(getString(R.string.localUrl), "");
         globalURL = prefs.getString(getString(R.string.globalUrl), "");
         pathHomepage = prefs.getString(getString(R.string.path_homepage), "");
@@ -675,23 +375,20 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
 
 
         if (vid.contains("Обычный")) {
-            getWindow().addFlags(
-                    WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
             tl.setVisibility(View.VISIBLE);
         }
 
         if (vid.contains("Полноэкранный")) {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-            getWindow().clearFlags(
-                    WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
             tl.setVisibility(View.VISIBLE);
         }
 
         if (vid.contains("Полноэкранный (без панели кнопок)")) {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-            getWindow().clearFlags(
-                    WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
             tl.setVisibility(View.GONE);
         }
 
@@ -769,8 +466,8 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
         if (update_period > 0) {
             Log.i(TAG, "Force reload timer started " + update_period);
             reloadTimerOn = true;
-			/*
-			reloadTimer = new Timer();
+            /*
+            reloadTimer = new Timer();
 			reloadTimer.schedule(new TimerTask() {
 			    @Override
 			    public void run() {
@@ -796,10 +493,18 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
             timerOn = false;
         }
 
-        voiceProximityEnable = (prefs.getString(getString(R.string.voice_proximity), "Выкл").equals("Вкл"));
+        voiceRecognizer = new VoiceRecognizer(this, REQUEST_CODE_VOICE, new VoiceRecognizer.InitListener() {
+            @Override
+            public void initStarted() {
+                turnOffFaceDetectionCamera();
+            }
 
+            @Override
+            public void initFailed() {
+                initiateFaceDetectionCamera();
+            }
+        });
         initiateFaceDetectionCamera();
-
     }
 
     private void initiateFaceDetectionCamera() {
@@ -858,8 +563,6 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     }
 
     private void extCommand(String command) {
-
-
         if (command.equals("hi") || command.equals("voice")) {
             imgb_voice_click(null);
         }
@@ -873,36 +576,25 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
             imgb_pult_click(null);
         }
         if (command.equals("videomessage")) {
-            if (voiceKeywordWorking) {
-                mRecognizer.cancel();
-                mRecognizer.stop();
-                voiceKeywordWorking = false;
+            if (voiceRecognizer != null) {
+                voiceRecognizer.release();
             }
             turnOffFaceDetectionCamera();
-            Intent vr = new Intent(this, VideoRecordActivity.class);
-            startActivityForResult(vr, REQUEST_CODE_MESSAGE);
+            startActivityForResult(new Intent(this, VideoRecordActivity.class), REQUEST_CODE_MESSAGE);
         }
         if (command.equals("qrscan")) {
             imgb_qr_click(null);
         }
-
         if (command.startsWith("url:")) {
-            String url = command;
-            url = url.replace("url:", "");
-            mWebView.loadUrl(url);
+            mWebView.loadUrl(command.replace("url:", ""));
         }
-
         if (command.startsWith("tts:")) {
-            String toSpeak = command;
-            toSpeak = toSpeak.replace("tts:", "");
-            tts1.speak(toSpeak, TextToSpeech.QUEUE_FLUSH, null);
+            voiceRecognizer.speak(command.replace("tts:", ""));
         }
-
         if (command.equals("pause")) {
             if (mediaPlayer.isPlaying())
                 mediaPlayer.pause();
         }
-
         if (command.startsWith("play:")) {
             String url = command;
             url = url.replace("play:", "");
@@ -914,12 +606,9 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
                 // TODO Auto-generated catch block
                 e.printStackTrace();
             }
-
-
         }
 
-        Toast toast = Toast.makeText(getApplicationContext(),
-                command, Toast.LENGTH_SHORT);
+        Toast toast = Toast.makeText(getApplicationContext(), command, Toast.LENGTH_SHORT);
         toast.setGravity(Gravity.BOTTOM, 0, 0);
         toast.show();
     }
@@ -935,27 +624,21 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     }
 
     private void voiceCommand(String command) {
-
         disableFacePost = true;
         webPost.loadUrl(getServerURL(serverURL) + pathVoice + command);
 
-
-        Toast toast = Toast.makeText(getApplicationContext(), command,
-                Toast.LENGTH_LONG);
+        Toast toast = Toast.makeText(getApplicationContext(), command, Toast.LENGTH_LONG);
         toast.setGravity(Gravity.BOTTOM, 0, 0);
         toast.show();
 
-        new android.os.Handler().postDelayed(
-                new Runnable() {
-                    public void run() {
-                        disableFacePost = false;
-                    }
-                },
-                3000);
-
+        new android.os.Handler().postDelayed(new Runnable() {
+            public void run() {
+                disableFacePost = false;
+            }
+        }, 3000);
 
 /*
-	    try{
+        try{
 	           HttpClient httpclient = new DefaultHttpClient();
 	           HttpGet request = new HttpGet();
 	           String authorizationString = "Basic " + Base64.encodeToString((login + ":" + passw).getBytes(),Base64.NO_WRAP);
@@ -1011,10 +694,8 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     }
 
     public void imgb_qr_click(View v) {
-        if (voiceKeywordWorking) {
-            mRecognizer.cancel();
-            mRecognizer.stop();
-            voiceKeywordWorking = false;
+        if (voiceRecognizer != null) {
+            voiceRecognizer.release();
         }
         turnOffFaceDetectionCamera();
 
@@ -1040,51 +721,8 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     }
 
     public void imgb_voice_click(View v) {
-
-        if (voiceGoogleInProgress) return;
-
-        PackageManager pm = getPackageManager();
-        List<ResolveInfo> activities = pm.queryIntentActivities(new Intent(
-                RecognizerIntent.ACTION_RECOGNIZE_SPEECH), 0);
-        if (activities.size() == 0) {
-            Toast toast = Toast.makeText(getApplicationContext(),
-                    "Голосовой движок не установлен", Toast.LENGTH_SHORT);
-            toast.setGravity(Gravity.BOTTOM, 0, 0);
-            toast.show();
-        } else {
-
-            if (voiceKeywordWorking) {
-                mRecognizer.cancel();
-                mRecognizer.stop();
-                voiceKeywordWorking = false;
-            }
-            turnOffFaceDetectionCamera();
-
-            voiceGoogleInProgress = true;
-            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Говорите...");
-            intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getClass().getPackage().getName());
-            startActivityForResult(intent, REQUEST_CODE_VOICE);
-
-
-            delayHandler.postDelayed(
-                    new Runnable() {
-                        public void run() {
-                            if (voiceGoogleInProgress) {
-                                finishActivity(REQUEST_CODE_VOICE);
-                                voiceGoogleInProgress = false;
-                                if (voiceKeywordEnable) {
-                                    mRecognizer.cancel();
-                                    mRecognizer.startListening(KWS_SEARCH);
-                                    voiceKeywordWorking = true;
-                                }
-                                initiateFaceDetectionCamera();
-                            }
-                        }
-                    },
-                    VOICE_INPUT_TIMIOUT_MILLIS);
-
+        if (voiceRecognizer != null) {
+            voiceRecognizer.startGoogleVoiceRecognize();
         }
     }
 
@@ -1148,10 +786,8 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
 //			}
 //		}
 
-        String deviceid = Secure.getString(this.getContentResolver(),
-                Secure.ANDROID_ID);
-        String battlevel = Integer.toString(batteryIntent.getIntExtra(
-                BatteryManager.EXTRA_LEVEL, -1));
+        String deviceid = Secure.getString(this.getContentResolver(), Secure.ANDROID_ID);
+        String battlevel = Integer.toString(batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1));
         String gpsUrl = getServerURL(serverURL) + pathGps + "?";
 
         if (latitude != 0)
@@ -1176,8 +812,6 @@ public class MainActivity extends Activity implements RecognitionListener, Senso
     }
 
     public int uploadFile(String sourceFileUri) {
-
-
         String fileName = sourceFileUri;
 
         HttpURLConnection conn = null;
