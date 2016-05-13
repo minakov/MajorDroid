@@ -6,9 +6,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.hardware.Camera;
-import android.hardware.Camera.Face;
-import android.hardware.Camera.FaceDetectionListener;
 import android.location.Criteria;
 import android.location.Location;
 import android.location.LocationListener;
@@ -30,7 +27,6 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
-import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
 import android.webkit.HttpAuthHandler;
@@ -59,12 +55,7 @@ import java.util.ArrayList;
 import java.util.Timer;
 import java.util.TimerTask;
 
-//import java.util.LinkedList;
-//import java.util.Queue;
-
-
 public class MainActivity extends Activity {
-
     private static final String TAG = MainActivity.class.getSimpleName();
     private static final int REQUEST_CODE_VOICE = 1234;
     private static final int REQUEST_CODE_MESSAGE = 1236;
@@ -73,6 +64,8 @@ public class MainActivity extends Activity {
     ProgressDialog dialog;
     @Nullable
     private VoiceRecognizer voiceRecognizer;
+    @Nullable
+    private FaceDetector faceDetector;
     private ReloadWebView reloadWebViewTimer;
     private WebView mWebView;
     private WebView webPost;
@@ -83,7 +76,6 @@ public class MainActivity extends Activity {
     private String tmpDostupAccess = "";
     private String tmpAdressAccess = "";
     private String uploadURL = "";
-    private String faceURL = "";
     private boolean outAccess = false;
     private boolean firstLoad = false;
     private String gpsTimeOut;
@@ -91,40 +83,10 @@ public class MainActivity extends Activity {
     private Timer timer;
     private TimerTask doAsynchronousTask;
     private boolean timerOn = false;
-    private boolean faceDetectionEnable = false;
-    private boolean faceDetectionWorking = false;
-    private boolean disableFacePost = false;
     private MediaPlayer mediaPlayer;
-    private String qrCameraSet;
-    private Camera mCamera;
-    private SurfaceView cameraSurface;
-    private int NumberOfFacesDetected = 0;
     private int serverResponseCode = 0;
     private String activityResultString = "";
-
-
-    private FaceDetectionListener faceDetectionListener = new FaceDetectionListener() {
-        @Override
-        public void onFaceDetection(Face[] faces, Camera camera) {
-            if (faces.length != NumberOfFacesDetected) {
-                Log.d("onFaceDetection", "Number of Faces:" + faces.length);
-                NumberOfFacesDetected = faces.length;
-                String resURL = faceURL + "&faces=" + Integer.toString(NumberOfFacesDetected);
-                //Log.d("onFaceDetection", "Loading face URL:" + resURL);
-                if (!disableFacePost) {
-                    webPost.loadUrl(resURL);
-                }
-
-                if (NumberOfFacesDetected > 0) {
-                    Toast toast = Toast.makeText(getApplicationContext(),
-                            "Faces detected: " + Integer.toString(NumberOfFacesDetected), Toast.LENGTH_SHORT);
-                    toast.setGravity(Gravity.BOTTOM, 0, 0);
-                    toast.show();
-                }
-
-            }
-        }
-    };
+    private boolean disableFacePost = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -169,12 +131,16 @@ public class MainActivity extends Activity {
         voiceRecognizer = new VoiceRecognizer(this, REQUEST_CODE_VOICE, new VoiceRecognizer.InitListener() {
             @Override
             public void initStarted() {
-                turnOffFaceDetectionCamera();
+                if (faceDetector != null) {
+                    faceDetector.stop();
+                }
             }
 
             @Override
             public void initFailed() {
-                initiateFaceDetectionCamera();
+                if (faceDetector != null) {
+                    faceDetector.start();
+                }
             }
         });
 
@@ -216,12 +182,13 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
-        Log.d(TAG, "Activity pause");
         super.onPause();
         if (voiceRecognizer != null) {
             voiceRecognizer.release();
         }
-        turnOffFaceDetectionCamera();
+        if (faceDetector != null) {
+            faceDetector.stop();
+        }
     }
 
     @Override
@@ -229,9 +196,9 @@ public class MainActivity extends Activity {
         if (voiceRecognizer != null) {
             voiceRecognizer.destroy();
         }
-        turnOffFaceDetectionCamera();
-        if (mCamera != null) mCamera = null;
-
+        if (faceDetector != null) {
+            faceDetector.destroy();
+        }
         super.onDestroy();
     }
 
@@ -341,7 +308,9 @@ public class MainActivity extends Activity {
             Log.d(TAG, "Activity finished (not OK)");
         }
 
-        initiateFaceDetectionCamera();
+        if (faceDetector != null) {
+            faceDetector.start();
+        }
 
         if (goToHome == 1) {
             imgb_home_click(null);
@@ -427,7 +396,7 @@ public class MainActivity extends Activity {
         }
 
         uploadURL = getServerURL(serverURL) + prefs.getString(getString(R.string.path_video), "");
-        faceURL = getServerURL(serverURL) + prefs.getString(getString(R.string.path_face), "");
+        final String faceURL = getServerURL(serverURL) + prefs.getString(getString(R.string.path_face), "");
 
         if (!serverURL.equals(tmpAdressAccess))
             firstLoad = false;
@@ -482,7 +451,6 @@ public class MainActivity extends Activity {
             reloadTimerOn = false;
         }
 
-
         gpsTimeOut = prefs.getString(getString(R.string.gps_period), "5");
         if ((prefs.getString(getString(R.string.gps_switch), "Выкл").equals("Вкл")) && (!timerOn)) {
             timer.schedule(doAsynchronousTask, 0,
@@ -496,70 +464,33 @@ public class MainActivity extends Activity {
         voiceRecognizer = new VoiceRecognizer(this, REQUEST_CODE_VOICE, new VoiceRecognizer.InitListener() {
             @Override
             public void initStarted() {
-                turnOffFaceDetectionCamera();
+                if (faceDetector != null) {
+                    faceDetector.stop();
+                }
             }
 
             @Override
             public void initFailed() {
-                initiateFaceDetectionCamera();
+                if (faceDetector != null) {
+                    faceDetector.start();
+                }
             }
         });
-        initiateFaceDetectionCamera();
-    }
-
-    private void initiateFaceDetectionCamera() {
-
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-
-
-        if (prefs.getString(getString(R.string.facedetection), "off").equals("on")) {
-            faceDetectionEnable = true;
-            if (!faceDetectionWorking) {
-                int cameraId = 0;
-                if (prefs.getString(getString(R.string.facecamera_switch), "0").equals("1")) {
-                    cameraId = getFrontFacingCameraId();
-                } else {
-                    cameraId = getBackFacingCameraId();
+        faceDetector = new FaceDetector(this, new FaceDetector.Listener() {
+            @Override
+            public void onFacesDetected(final int numberOfFacesDetected) {
+                String resURL = faceURL + "&faces=" + Integer.toString(numberOfFacesDetected);
+                if (!disableFacePost) {
+                    webPost.loadUrl(resURL);
                 }
-                Log.d(TAG, "Initiating camera " + Integer.toString(cameraId));
-                mCamera = Camera.open(cameraId);
-                cameraSurface = new SurfaceView(this);
-                if (mCamera.getParameters().getMaxNumDetectedFaces() > 0) {
-                    try {
-                        mCamera.setPreviewDisplay(cameraSurface.getHolder());
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                    mCamera.setFaceDetectionListener(faceDetectionListener);
-                    mCamera.startPreview();
-                    mCamera.startFaceDetection();
-                    Log.d(TAG, "Face detection started for camera " + Integer.toString(cameraId));
-                    faceDetectionWorking = true;
-                } else {
-                    Toast.makeText(this, "Face detection is not supported for camera " + Integer.toString(cameraId), Toast.LENGTH_SHORT).show();
-                    Log.d(TAG, "Face detection is not supported for camera " + Integer.toString(cameraId));
-                    faceDetectionWorking = false;
-                    faceDetectionEnable = false;
-                    mCamera.release();
+                if (numberOfFacesDetected > 0) {
+                    Toast toast = Toast.makeText(getApplicationContext(), "Faces detected: " + Integer.toString(numberOfFacesDetected), Toast.LENGTH_SHORT);
+                    toast.setGravity(Gravity.BOTTOM, 0, 0);
+                    toast.show();
                 }
             }
-        } else {
-            Log.d(TAG, "Facedetection disabled");
-            faceDetectionEnable = false;
-            turnOffFaceDetectionCamera();
-        }
-
-    }
-
-    private void turnOffFaceDetectionCamera() {
-        if (faceDetectionWorking) {
-            mCamera.setFaceDetectionListener(null);
-            mCamera.setErrorCallback(null);
-            mCamera.stopPreview();
-            mCamera.release();
-            faceDetectionWorking = false;
-            Log.d(TAG, "Facedetection stopped");
-        }
+        });
+        faceDetector.start();
     }
 
     private void extCommand(String command) {
@@ -579,7 +510,9 @@ public class MainActivity extends Activity {
             if (voiceRecognizer != null) {
                 voiceRecognizer.release();
             }
-            turnOffFaceDetectionCamera();
+            if (faceDetector != null) {
+                faceDetector.stop();
+            }
             startActivityForResult(new Intent(this, VideoRecordActivity.class), REQUEST_CODE_MESSAGE);
         }
         if (command.equals("qrscan")) {
@@ -657,67 +590,20 @@ public class MainActivity extends Activity {
         loadHomePage(1);
     }
 
-    private int getFrontFacingCameraId() {
-        int cameraCount = 0;
-        int cam = 0;
-        Camera.CameraInfo cameraInfo = new Camera.CameraInfo();
-        cameraCount = Camera.getNumberOfCameras();
-        for (int camIdx = 0; camIdx < cameraCount; camIdx++) {
-            Camera.getCameraInfo(camIdx, cameraInfo);
-            if (cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
-                try {
-                    cam = camIdx;
-                } catch (RuntimeException e) {
-                    Log.e(TAG, "Camera failed to open: " + e.getLocalizedMessage());
-                }
-            }
-        }
-        return cam;
-    }
-
-    private int getBackFacingCameraId() {
-        int cameraCount = 0;
-        int cam = 0;
-        Camera.CameraInfo cameraInfo = new Camera.CameraInfo();
-        cameraCount = Camera.getNumberOfCameras();
-        for (int camIdx = 0; camIdx < cameraCount; camIdx++) {
-            Camera.getCameraInfo(camIdx, cameraInfo);
-            if (cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_BACK) {
-                try {
-                    cam = camIdx;
-                } catch (RuntimeException e) {
-                    Log.e(TAG, "Camera failed to open: " + e.getLocalizedMessage());
-                }
-            }
-        }
-        return cam;
-    }
-
     public void imgb_qr_click(View v) {
         if (voiceRecognizer != null) {
             voiceRecognizer.release();
         }
-        turnOffFaceDetectionCamera();
-
-        IntentIntegrator integrator = new IntentIntegrator(MainActivity.this);
-
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        qrCameraSet = prefs.getString(getString(R.string.qrcamera_switch), "0");
-        if (!qrCameraSet.equals("0")) {
-            Log.d(TAG, "Searching front qr camera " + qrCameraSet);
-            int camID = getFrontFacingCameraId();
-            Log.d(TAG, "Camera qr found " + Integer.toString(camID));
-            integrator.setCameraId(Integer.toString(camID));
-        } else {
-            Log.d(TAG, "Searching back qr camera " + qrCameraSet);
-            int camID = getBackFacingCameraId();
-            Log.d(TAG, "Camera qr found " + Integer.toString(camID));
-            integrator.setCameraId(Integer.toString(camID));
+        if (faceDetector != null) {
+            faceDetector.stop();
         }
 
+        final Integer cameraId = Prefs.getQrDetectionCameraId(this);
+        Log.d(TAG, "Camera qr found " + cameraId);
+
+        IntentIntegrator integrator = new IntentIntegrator(MainActivity.this);
+        integrator.setCameraId(cameraId);
         integrator.initiateScan();
-
-
     }
 
     public void imgb_voice_click(View v) {

@@ -37,7 +37,7 @@ import edu.cmu.pocketsphinx.SpeechRecognizer;
 import edu.cmu.pocketsphinx.SpeechRecognizerSetup;
 
 public class VoiceRecognizer implements RecognitionListener, SensorEventListener {
-    private static final String TAG = "Recognizer";
+    private static final String TAG = "VoiceRecognizer";
     private static final String KWS_SEARCH = "hotword";
     private static final String COMMAND_SEARCH = "command";
     private static final int VOICE_INPUT_TIMIOUT_MILLIS = 10000;

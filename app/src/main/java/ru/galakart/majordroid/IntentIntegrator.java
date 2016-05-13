@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
+import android.support.annotation.Nullable;
 import android.util.Log;
 
 import java.util.Arrays;
@@ -44,7 +45,7 @@ public final class IntentIntegrator {
 
     private final Activity activity;
     private String title;
-    private String camera_id = "";
+    private Integer cameraId;
     private String message;
     private String buttonYes;
     private String buttonNo;
@@ -99,8 +100,8 @@ public final class IntentIntegrator {
         this.title = title;
     }
 
-    public void setCameraId(String camera_id) {
-        this.camera_id = camera_id;
+    public void setCameraId(@Nullable final Integer cameraId) {
+        this.cameraId = cameraId;
     }
 
     public void setTitleByID(int titleID) {
@@ -191,9 +192,9 @@ public final class IntentIntegrator {
         intentScan.setPackage(targetAppPackage);
         intentScan.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
         intentScan.addFlags(Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET);
-        if (camera_id != "") {
-            intentScan.putExtra("SCAN_CAMERA_ID", Integer.parseInt(camera_id));
-            Log.d(TAG, "QRCamera set to " + camera_id);
+        if (cameraId != null) {
+            intentScan.putExtra("SCAN_CAMERA_ID", cameraId);
+            Log.d(TAG, "QRCamera set to " + cameraId);
         }
         activity.startActivityForResult(intentScan, REQUEST_CODE);
         return null;
