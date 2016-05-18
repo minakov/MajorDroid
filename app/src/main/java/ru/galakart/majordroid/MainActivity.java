@@ -6,10 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.location.Criteria;
 import android.location.Location;
-import android.location.LocationListener;
-import android.location.LocationManager;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.net.wifi.WifiInfo;
@@ -17,11 +14,12 @@ import android.net.wifi.WifiManager;
 import android.os.AsyncTask;
 import android.os.BatteryManager;
 import android.os.Bundle;
-import android.os.Handler;
 import android.preference.PreferenceManager;
-import android.provider.Settings.Secure;
+import android.provider.Settings;
 import android.speech.RecognizerIntent;
+import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
+import android.text.TextUtils;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -63,6 +61,8 @@ public class MainActivity extends Activity {
     private final int TCP_SERVER_PORT = 7999; //Define the server port
     ProgressDialog dialog;
     @Nullable
+    private LocationDetector locationDetector;
+    @Nullable
     private VoiceRecognizer voiceRecognizer;
     @Nullable
     private FaceDetector faceDetector;
@@ -78,15 +78,13 @@ public class MainActivity extends Activity {
     private String uploadURL = "";
     private boolean outAccess = false;
     private boolean firstLoad = false;
-    private String gpsTimeOut;
     private boolean reloadTimerOn = false;
-    private Timer timer;
-    private TimerTask doAsynchronousTask;
-    private boolean timerOn = false;
     private MediaPlayer mediaPlayer;
     private int serverResponseCode = 0;
     private String activityResultString = "";
     private boolean disableFacePost = false;
+    @Nullable
+    private Intent batteryIntent;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -112,22 +110,6 @@ public class MainActivity extends Activity {
             }
         });
 
-        final Handler handler = new Handler();
-        timer = new Timer();
-        doAsynchronousTask = new TimerTask() {
-            @Override
-            public void run() {
-                handler.post(new Runnable() {
-                    public void run() {
-                        try {
-                            gpsSend();
-                        } catch (Exception e) {
-                        }
-                    }
-                });
-            }
-        };
-
         voiceRecognizer = new VoiceRecognizer(this, REQUEST_CODE_VOICE, new VoiceRecognizer.InitListener() {
             @Override
             public void initStarted() {
@@ -143,13 +125,6 @@ public class MainActivity extends Activity {
                 }
             }
         });
-
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        gpsTimeOut = prefs.getString(getString(R.string.gps_period), "5");
-        if ((prefs.getString(getString(R.string.gps_switch), "Выкл").equals("Вкл")) && (!timerOn)) {
-            timer.schedule(doAsynchronousTask, 0, Long.parseLong(gpsTimeOut) * 60 * 1000);
-            timerOn = true;
-        }
 
         //New thread to listen to incoming connections
         new Thread(new Runnable() {
@@ -230,8 +205,8 @@ public class MainActivity extends Activity {
                 return true;
 
             case R.id.action_quit:
-                if (timerOn) {
-                    timer.cancel();
+                if (locationDetector != null) {
+                    locationDetector.cancel();
                 }
                 if (voiceRecognizer != null) {
                     voiceRecognizer.quit();
@@ -433,7 +408,7 @@ public class MainActivity extends Activity {
         }
 
         if (update_period > 0) {
-            Log.i(TAG, "Force reload timer started " + update_period);
+            Log.i(TAG, "Force reload gpsTimer started " + update_period);
             reloadTimerOn = true;
             /*
             reloadTimer = new Timer();
@@ -451,15 +426,16 @@ public class MainActivity extends Activity {
             reloadTimerOn = false;
         }
 
-        gpsTimeOut = prefs.getString(getString(R.string.gps_period), "5");
-        if ((prefs.getString(getString(R.string.gps_switch), "Выкл").equals("Вкл")) && (!timerOn)) {
-            timer.schedule(doAsynchronousTask, 0,
-                    Long.parseLong(gpsTimeOut) * 60 * 1000);
-            timerOn = true;
-        } else if ((prefs.getString(getString(R.string.gps_switch), "Выкл").equals("Выкл")) && (timerOn)) {
-            timer.cancel();
-            timerOn = false;
+        batteryIntent = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (locationDetector != null) {
+            locationDetector.cancel();
         }
+        locationDetector = new LocationDetector(this, new LocationDetector.Listener() {
+            @Override
+            public void onLocationChanged(@NonNull final Location location) {
+                gpsSend(location);
+            }
+        });
 
         voiceRecognizer = new VoiceRecognizer(this, REQUEST_CODE_VOICE, new VoiceRecognizer.InitListener() {
             @Override
@@ -491,6 +467,32 @@ public class MainActivity extends Activity {
             }
         });
         faceDetector.start();
+    }
+
+    private void gpsSend(@NonNull final Location location) {
+        String deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        int batteryLevel = batteryIntent != null ? batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) : -1;
+        String gpsUrl = getServerURL(serverURL) + pathGps + "?";
+
+        if (location.getLatitude() != 0)
+            gpsUrl += "latitude=" + location.getLatitude() + "&";
+        if (location.getLongitude() != 0)
+            gpsUrl += "longitude=" + location.getLongitude() + "&";
+        if (location.getAltitude() != 0)
+            gpsUrl += "altitude=" + location.getAltitude() + "&";
+        if (!TextUtils.isEmpty(location.getProvider()))
+            gpsUrl += "provider=" + location.getProvider() + "&";
+        if (location.getSpeed() != 0)
+            gpsUrl += "speed=" + location.getSpeed() + "&";
+        if (batteryLevel != -1)
+            gpsUrl += "battlevel=" + batteryLevel + "&";
+        if (!TextUtils.isEmpty(deviceId))
+            gpsUrl += "deviceid=" + deviceId + "&";
+        if (location.getAccuracy() != 0)
+            gpsUrl += "accuracy=" + location.getAccuracy() + "&";
+
+        if (!TextUtils.isEmpty(serverURL))
+            webPost.loadUrl(gpsUrl);
     }
 
     private void extCommand(String command) {
@@ -615,7 +617,10 @@ public class MainActivity extends Activity {
     public void imgb_pult_click(View v) {
         Intent j = new Intent(this, ControsActivity.class);
         startActivity(j);
-        gpsSend();
+        final Location location = LocationDetector.getLocation();
+        if (location != null) {
+            gpsSend(location);
+        }
     }
 
     public void imgb_settings_click(View v) {
@@ -633,68 +638,6 @@ public class MainActivity extends Activity {
         } catch (Exception a) {
         }
         return false;
-    }
-
-    private void gpsSend() {
-        Intent batteryIntent = registerReceiver(null, new IntentFilter(
-                Intent.ACTION_BATTERY_CHANGED));
-        double latitude = 0, longitude = 0, altitude = 0, speed = 0, accuracy = 0;
-        String provider = "";
-        LocationManager mlocManager = null;
-        LocationListener mlocListener;
-        mlocManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-        mlocListener = new MyLocationListener();
-        Criteria criteria = new Criteria();
-        criteria.setAccuracy(Criteria.ACCURACY_FINE);
-        mlocManager.requestLocationUpdates(mlocManager.getBestProvider(criteria, true), 10000, 0,
-                mlocListener);
-
-//		if (mlocManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-        if (MyLocationListener.latitude > 0) {
-            latitude = MyLocationListener.latitude;
-            longitude = MyLocationListener.longitude;
-            altitude = MyLocationListener.altitude;
-            speed = MyLocationListener.speed;
-            accuracy = MyLocationListener.accuracy;
-            provider = MyLocationListener.provider;
-        }
-//		}
-//		else {
-//			if (mlocManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-//				if (MyLocationListener.latitude > 0) {
-//					latitude = MyLocationListener.latitude;
-//					longitude = MyLocationListener.longitude;
-//					altitude = MyLocationListener.altitude;
-//					speed = MyLocationListener.speed;
-//					accuracy = MyLocationListener.accuracy;
-//					provider = MyLocationListener.provider;
-//				}
-//			}
-//		}
-
-        String deviceid = Secure.getString(this.getContentResolver(), Secure.ANDROID_ID);
-        String battlevel = Integer.toString(batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1));
-        String gpsUrl = getServerURL(serverURL) + pathGps + "?";
-
-        if (latitude != 0)
-            gpsUrl += "latitude=" + latitude + "&";
-        if (longitude != 0)
-            gpsUrl += "longitude=" + longitude + "&";
-        if (altitude != 0)
-            gpsUrl += "altitude=" + altitude + "&";
-        if (provider != "")
-            gpsUrl += "provider=" + provider + "&";
-        if (speed != 0)
-            gpsUrl += "speed=" + speed + "&";
-        if (battlevel != "")
-            gpsUrl += "battlevel=" + battlevel + "&";
-        if (deviceid != "")
-            gpsUrl += "deviceid=" + deviceid + "&";
-        if (accuracy != 0)
-            gpsUrl += "accuracy=" + accuracy + "&";
-
-        if (serverURL != "")
-            webPost.loadUrl(gpsUrl);
     }
 
     public int uploadFile(String sourceFileUri) {
@@ -827,43 +770,6 @@ public class MainActivity extends Activity {
             return serverResponseCode;
 
         } // End else block
-    }
-
-    public static class MyLocationListener implements LocationListener {
-
-        public static double latitude = 0;
-        public static double longitude = 0;
-        public static double altitude = 0;
-        public static double speed = 0;
-        public static double accuracy = 0;
-        public static String provider = "";
-
-        @Override
-        public void onLocationChanged(Location loc) {
-            loc.getLatitude();
-            loc.getLongitude();
-            latitude = loc.getLatitude();
-            longitude = loc.getLongitude();
-            altitude = loc.getAltitude();
-            speed = loc.getSpeed();
-            accuracy = loc.getAccuracy();
-            provider = loc.getProvider();
-        }
-
-        @Override
-        public void onProviderDisabled(String provider) {
-            // print "Currently GPS is Disabled";
-        }
-
-        @Override
-        public void onProviderEnabled(String provider) {
-            // print "GPS got Enabled";
-        }
-
-        @Override
-        public void onStatusChanged(String provider, int status, Bundle extras) {
-            // TODO Auto-generated method stub
-        }
     }
 
     protected class ReloadWebView extends TimerTask {
